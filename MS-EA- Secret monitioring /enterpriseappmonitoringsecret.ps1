@@ -89,40 +89,79 @@ Function Get-MSGraphRequest {
 }
 
 # Assuming you have a list of applications in the variable "$applications"
-# Modify the code to only show applications expiring in 180 days
-$array = @()
+# Modify the code to only show applications expiring inside the defined threshold
+$results = @()
 $applications = Get-MSGraphRequest -AccessToken $tokenResponse.access_token -Uri "https://graph.microsoft.com/v1.0/applications/"
-$Applications | Sort-Object displayName | Foreach-Object {
-    #If there are more than one password credentials, we need to get the expiration of each one
-    if ($_.passwordCredentials.endDateTime.count -gt 1) {
-        $endDates = $_.passwordCredentials.endDateTime
-        [int[]]$daysUntilExpiration = @()
-        # Assuming $_.passwordCredentials.endDateTime is a DateTime object
-foreach ($Date in $endDates) {
-    if ($Date -ne $null) {
-        $Date = [TimeZoneInfo]::ConvertTimeBySystemTimeZoneId([DateTime]$Date, 'Central Standard Time')
-        $daysUntilExpiration += (New-TimeSpan -Start ([System.TimeZoneInfo]::ConvertTimeBySystemTimeZoneId([DateTime]::Now, "Central Standard Time")) -End $Date).Days
-    }
-}
-    }
-    Elseif ($_.passwordCredentials.endDateTime.count -eq 1) {
-        $Date = [TimeZoneInfo]::ConvertTimeBySystemTimeZoneId($_.passwordCredentials.endDateTime, 'Central Standard Time')
-        $daysUntilExpiration = (New-TimeSpan -Start ([System.TimeZoneInfo]::ConvertTimeBySystemTimeZoneId([DateTime]::Now, "Central Standard Time")) -End $Date).Days 
+$expirationThresholdInDays = 30
+$timeZoneId = 'Central Standard Time'
+$currentTime = [System.TimeZoneInfo]::ConvertTimeBySystemTimeZoneId([DateTime]::UtcNow, $timeZoneId)
+
+foreach ($app in $applications | Sort-Object displayName) {
+    $passwordCreds = $app.passwordCredentials | Where-Object { $_.endDateTime }
+    if (-not $passwordCreds) {
+        continue
     }
 
-    if ($daysUntilExpiration -le 30) {
-        $array += $_ | Select-Object id, displayName, @{
-            name = "daysUntil"; 
-            expr = { $daysUntilExpiration } 
+    $expiringSecrets = @()
+    foreach ($cred in $passwordCreds) {
+        $endDate = [TimeZoneInfo]::ConvertTimeBySystemTimeZoneId([DateTime]$cred.endDateTime, $timeZoneId)
+        if ($endDate -is [system.array]) {
+            $endDate = $endDate[0]
+        }
+
+        $timeSpan = New-TimeSpan -Start $currentTime -End $endDate
+        $daysUntilExpiration = [int][Math]::Floor($timeSpan.TotalDays)
+        if ($daysUntilExpiration -le $expirationThresholdInDays) {
+            $expiringSecrets += [PSCustomObject]@{
+                KeyId     = $cred.KeyId
+                EndDate   = $endDate
+                DaysUntil = $daysUntilExpiration
+            }
+        }
+    }
+
+    if (-not $expiringSecrets) {
+        continue
+    }
+
+    $ownerUri = "https://graph.microsoft.com/v1.0/applications/$($app.id)/owners?$select=displayName,userPrincipalName,mail"
+    $owners = Get-MSGraphRequest -AccessToken $tokenResponse.access_token -Uri $ownerUri
+    $ownerDisplay = if ($owners) {
+        ($owners | ForEach-Object {
+            if ($_.userPrincipalName) {
+                "{0} ({1})" -f $_.displayName, $_.userPrincipalName
+            }
+            elseif ($_.mail) {
+                "{0} ({1})" -f $_.displayName, $_.mail
+            }
+            else {
+                $_.displayName
+            }
+        }) -join ', '
+    }
+    else {
+        'No owners assigned'
+    }
+
+    foreach ($secret in $expiringSecrets | Sort-Object DaysUntil, EndDate) {
+        $daysUntilValue = if ($secret.DaysUntil -is [system.array]) { [int]$secret.DaysUntil[0] } else { [int]$secret.DaysUntil }
+
+        $results += [PSCustomObject]@{
+            AppId       = $app.id
+            DisplayName = $app.displayName
+            SecretKeyId = $secret.KeyId
+            DaysUntil   = $daysUntilValue
+            Expiration  = $secret.EndDate.ToString('yyyy-MM-dd HH:mm')
+            Owners      = $ownerDisplay
         }
     }
 }
 
-$textTable = $array | Sort-Object daysUntil | select-object displayName, daysUntil | ConvertTo-Html
+$textTable = $results | Sort-Object DisplayName, DaysUntil | Select-Object DisplayName, SecretKeyId, @{Name='DaysUntil';Expression={[string]($_.DaysUntil)}}, Expiration, Owners | ConvertTo-Html
 $JSONBody = [PSCustomObject][Ordered]@{
     "@type"      = "MessageCard"
     "@context"   = "<http://schema.org/extensions>"
-    "themeColor" = '0078D7'
+    "themeColor" = 'c13d29'
     "title"      = "$($Array.count) App Secrets are expiring Soon"
     "text"       = "$textTable"
 }
@@ -130,7 +169,7 @@ $JSONBody = [PSCustomObject][Ordered]@{
 $TeamMessageBody = ConvertTo-Json $JSONBody
 
 $parameters = @{
-    "URI"         = "$URL"
+    "URI"         = "$Uri"
     "Method"      = 'POST'
     "Body"        = $TeamMessageBody
     "ContentType" = 'application/json'
