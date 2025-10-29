@@ -18,9 +18,14 @@
 # 1. The script requires the following permissions:
 # Application.Read.All
 # Directory.Read.All
-# User.Reada
+# User.Read.All
 
 
+##Change these variables to customize the report using $False or $True
+$UserIncludeSecrets = $true
+$UserIncludeAPIPermissions = $true
+$UserIncludeUserGroupAssignments = $true
+##
 
 
 $TenantID = Get-AutomationVariable -Name 'TenantID'
@@ -104,7 +109,7 @@ Function Get-ServicePrincipalByAppId {
         return $script:ServicePrincipalCache[$AppId]
     }
 
-    $uri = 'https://graph.microsoft.com/v1.0/servicePrincipals?$filter=appId eq ''{0}''&$select=id,displayName,appId,appRoles,oauth2PermissionScopes' -f $AppId
+    $uri = 'https://graph.microsoft.com/v1.0/servicePrincipals?$filter=appId eq ''{0}''&$select=id,displayName,appId,appRoles,oauth2PermissionScopes,appRoleAssignmentRequired' -f $AppId
     $servicePrincipal = Get-MSGraphRequest -AccessToken $AccessToken -Uri $uri | Select-Object -First 1
     $script:ServicePrincipalCache[$AppId] = $servicePrincipal
     return $servicePrincipal
@@ -168,6 +173,7 @@ foreach ($app in $applications | Sort-Object displayName) {
     }
 
     $servicePrincipal = Get-ServicePrincipalByAppId -AppId $app.appId -AccessToken $tokenResponse.access_token
+    $isRequired = if ($servicePrincipal -and $servicePrincipal.appRoleAssignmentRequired) { 'Yes' } else { 'No' }
     $localDelegatedPermissions = @()
     $localApplicationPermissions = @()
 
@@ -267,6 +273,7 @@ foreach ($app in $applications | Sort-Object displayName) {
             DaysUntil              = $daysUntilValue
             Expiration             = $secret.EndDate.ToString('yyyy-MM-dd HH:mm')
             Owners                 = $ownerDisplay
+            IsRequired             = $isRequired
             DelegatedPermissions   = $delegatedSummary
             ApplicationPermissions = $applicationSummary
             Assignments            = $assignmentSummary
@@ -277,10 +284,11 @@ foreach ($app in $applications | Sort-Object displayName) {
 # Comment out any of the sections below to exclude them from the Teams message payload.
 $sections = @()
 
-if ($results) {
+if ($UserIncludeSecrets -eq $true) {
+    if ($results) {
     $secretTable = ($results |
         Sort-Object DisplayName, DaysUntil |
-        Select-Object DisplayName, SecretKeyId, @{Name = 'DaysUntil'; Expression = { [string]$_.DaysUntil }}, Expiration, Owners, DelegatedPermissions, ApplicationPermissions, Assignments |
+        Select-Object DisplayName, SecretKeyId, @{Name = 'DaysUntil'; Expression = { [string]$_.DaysUntil }}, Expiration, Owners, IsRequired, DelegatedPermissions, ApplicationPermissions, Assignments |
         ConvertTo-Html -Fragment | Out-String).Trim()
 
     $sections += @{
@@ -288,28 +296,34 @@ if ($results) {
         Content = $secretTable
     }
 }
+}
 
-if ($permissionRows) {
-    $permissionTable = ($permissionRows |
-        Sort-Object AppDisplayName, PermissionType, Resource, PermissionName |
-        ConvertTo-Html -Fragment | Out-String).Trim()
+if ($UserIncludeAPIPermissions -eq $true) {
+    if ($permissionRows) {
+        $permissionTable = ($permissionRows |
+            Sort-Object AppDisplayName, PermissionType, Resource, PermissionName |
+            ConvertTo-Html -Fragment | Out-String).Trim()
 
-    $sections += @{
-        Title   = 'API Permissions'
-        Content = $permissionTable
+        $sections += @{
+            Title   = 'API Permissions'
+            Content = $permissionTable
+        }
     }
 }
 
-if ($assignmentRows) {
-    $assignmentTable = ($assignmentRows |
-        Sort-Object AppDisplayName, PrincipalType, PrincipalDisplayName |
-        ConvertTo-Html -Fragment | Out-String).Trim()
+if ($UserIncludeUserGroupAssignments -eq $true) {
+    if ($assignmentRows) {
+        $assignmentTable = ($assignmentRows |
+            Sort-Object AppDisplayName, PrincipalType, PrincipalDisplayName |
+            ConvertTo-Html -Fragment | Out-String).Trim()
 
-    $sections += @{
-        Title   = 'User and Group Assignments'
-        Content = $assignmentTable
+        $sections += @{
+            Title   = 'User and Group Assignments'
+            Content = $assignmentTable
+        }
     }
 }
+
 
 $textTable = if ($sections) {
     ($sections | ForEach-Object { "<h3>{0}</h3>{1}" -f $_.Title, $_.Content }) -join '<br />'
